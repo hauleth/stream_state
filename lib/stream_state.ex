@@ -13,12 +13,15 @@ defmodule StreamState do
 
   def run_commands(commands) do
     import ExUnit.Assertions
+
     commands
     |> Enum.reduce(%__MODULE__{}, fn cmd, acc ->
       cmd
       |> execute_cmd()
       |> case do
-        {:ok, next_state} -> next_state
+        {:ok, next_state} ->
+          next_state
+
         {:pre, state, cmd} ->
           assert false, """
           Precondition failed.
@@ -27,18 +30,19 @@ defmodule StreamState do
           State:   #{inspect(state)}
 
           History:
-          #{print_history acc}
+          #{print_history(acc)}
           """
+
         {:post, state, cmd, result} ->
           assert false, """
           Postcondition failed.
 
           Command: #{print_command(cmd)}
           State:   #{inspect(state)}
-          Result:  #{inspect result}
+          Result:  #{inspect(result)}
 
           History:
-          #{print_history acc}
+          #{print_history(acc)}
           """
       end
       |> update_history(acc)
@@ -58,7 +62,7 @@ defmodule StreamState do
   defp print_history(%__MODULE__{history: history}) do
     history
     |> Enum.reverse()
-    |> Enum.map(fn {_, cmd, ret} -> print_command(cmd) <> " => #{inspect ret}" end)
+    |> Enum.map(fn {_, cmd, ret} -> print_command(cmd) <> " => #{inspect(ret)}" end)
     |> Enum.join("\n")
   end
 
@@ -81,17 +85,14 @@ defmodule StreamState do
 
   defp command_list(mod) do
     mod.module_info(:exports)
-    |> Stream.map(fn {func, arity} -> {Atom.to_string(func), arity} end)
-    |> Stream.filter(fn {func, arity} ->
-      String.ends_with?(func, "_next") and arity in [3]
-    end)
-    |> Stream.map(fn {func, arity} ->
-      {String.replace_suffix(func, "_next", ""), arity}
+    |> Stream.filter(fn {func, _arity} ->
+      function_exported?(mod, :"#{func}_args", 1) or
+        function_exported?(mod, :"#{func}_command", 1)
     end)
     |> Enum.map(fn {func, _arity} ->
       if function_exported?(mod, :"#{func}_args", 1) do
         args_fun = fn state -> apply(mod, :"#{func}_args", [state]) end
-        args = gen_call(mod, String.to_atom(func), args_fun)
+        args = gen_call(mod, func, args_fun)
         {:cmd, mod, :"#{func}", args}
       else
         {:cmd, mod, :"#{func}", &apply(mod, :"#{func}_command", &1)}
@@ -153,7 +154,13 @@ defmodule StreamState do
   end
 
   defp call_next_state({:call, mod, f, args}, state, result) do
-    apply(mod, :"#{f}_next", [state, args, result])
+    name = :"#{f}_next"
+
+    if function_exported?(mod, name, 3) do
+      apply(mod, :"#{f}_next", [state, args, result])
+    else
+      state
+    end
   end
 
   defp check_preconditions(list) do

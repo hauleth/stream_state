@@ -68,6 +68,5 @@ defmodule StreamStateTest do
 
   def get, do: Counter.clear()
   def get_args(_state), do: StreamData.constant([])
-  def get_next(state, _args, _result), do: state
   def get_post(_state, _args, result), do: result > 0
 end
