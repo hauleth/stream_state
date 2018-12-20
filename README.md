@@ -1,5 +1,9 @@
 # StreamState
 
+[![CircleCI](https://circleci.com/gh/hauleth/stream_state.svg?style=svg)](https://circleci.com/gh/hauleth/stream_state)
+[![codecov](https://codecov.io/gh/hauleth/stream_state/branch/master/graph/badge.svg)](https://codecov.io/gh/hauleth/stream_state)
+[![Inch CI](https://inch-ci.org/github/hauleth/stream_state.svg?branch=master)](https://inch-ci.org/github/hauleth/stream_state?branch=master)
+
 Stateful testing implemented on top of [StreamData][stream_data]
 
 ## Installation
