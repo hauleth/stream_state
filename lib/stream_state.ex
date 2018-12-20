@@ -103,7 +103,7 @@ defmodule StreamState do
     struct(test_state, state: state, history: [event | history])
   end
 
-  def command_list(mod) do
+  defp command_list(mod) do
     mod.module_info(:exports)
     |> Stream.filter(fn {func, _arity} ->
       function_exported?(mod, :"#{func}_args", 1) or
