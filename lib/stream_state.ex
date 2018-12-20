@@ -3,51 +3,71 @@ defmodule StreamState do
   Provides the API of `eqc_statem` with the grouped functions.
   """
 
-  alias StreamData.LazyTree
-
   import StreamData
+  import ExUnit.Assertions
+
+  @type symbolic_state :: term()
+  @opaque command :: {:call, module(), atom(), list()}
 
   defstruct history: [],
             state: nil,
             result: :ok
 
   def run_commands(commands) do
-    import ExUnit.Assertions
-
     commands
-    |> Enum.reduce(%__MODULE__{}, fn cmd, acc ->
+    |> Enum.reduce_while(%__MODULE__{}, fn cmd, acc ->
       cmd
       |> execute_cmd()
       |> case do
         {:ok, next_state} ->
-          next_state
+          {:cont, update_history(next_state, acc)}
 
         {:pre, state, cmd} ->
-          assert false, """
-          Precondition failed.
-
-          Command: #{print_command(cmd)}
-          State:   #{inspect(state)}
-
-          History:
-          #{print_history(acc)}
-          """
+          {:halt, struct(acc, result: {:failed, {:pre, cmd}}, state: state)}
 
         {:post, state, cmd, result} ->
-          assert false, """
-          Postcondition failed.
-
-          Command: #{print_command(cmd)}
-          State:   #{inspect(state)}
-          Result:  #{inspect(result)}
-
-          History:
-          #{print_history(acc)}
-          """
+          {:halt, struct(acc, result: {:failed, {:post, cmd, result}}, state: state)}
       end
-      |> update_history(acc)
     end)
-    |> struct(result: :ok)
+  end
+
+  def assert_state(%__MODULE__{result: :ok}), do: :ok
+
+  def assert_state(%__MODULE__{result: {:failed, failure}, state: state, history: history}) do
+    assert false, format_msg(failure, state, history)
+  end
+
+  defp format_msg({:post, cmd, result}, state, history) do
+    """
+    Postcondition failed.
+
+    Current state: #{inspect(state)}
+
+    History:
+
+    #{print_history(history)}
+
+    Failed:
+
+      Command: #{print_command(cmd)}
+      Result:  #{inspect(result)}
+    """
+  end
+
+  defp format_msg({:pre, cmd}, state, history) do
+    """
+    Precondition failed.
+
+    Current state: #{inspect(state)}
+
+    History:
+
+    #{print_history(history)}
+
+    Failed:
+
+      Command: #{print_command(cmd)}
+    """
   end
 
   defp print_command({:call, mod, func, args}) do
@@ -59,7 +79,7 @@ defmodule StreamState do
     "#{inspect(mod)}.#{func}(#{pretty_args})"
   end
 
-  defp print_history(%__MODULE__{history: history}) do
+  defp print_history(history) do
     history
     |> Enum.reverse()
     |> Enum.map(fn {_, cmd, ret} -> print_command(cmd) <> " => #{inspect(ret)}" end)
@@ -79,11 +99,11 @@ defmodule StreamState do
     {:post, result} -> {:post, state, cmd, result}
   end
 
-  defp update_history({state, _, result} = event, %__MODULE__{history: history}) do
-    %__MODULE__{state: state, result: result, history: [event | history]}
+  defp update_history({state, _, _} = event, %__MODULE__{history: history} = test_state) do
+    struct(test_state, state: state, history: [event | history])
   end
 
-  defp command_list(mod) do
+  def command_list(mod) do
     mod.module_info(:exports)
     |> Stream.filter(fn {func, _arity} ->
       function_exported?(mod, :"#{func}_args", 1) or
@@ -91,11 +111,41 @@ defmodule StreamState do
     end)
     |> Enum.map(fn {func, _arity} ->
       if function_exported?(mod, :"#{func}_args", 1) do
-        args_fun = fn state -> apply(mod, :"#{func}_args", [state]) end
+        args_fun = fn state -> constant(apply(mod, :"#{func}_args", [state])) end
         args = gen_call(mod, func, args_fun)
         {:cmd, mod, :"#{func}", args}
       else
         {:cmd, mod, :"#{func}", &apply(mod, :"#{func}_command", &1)}
+      end
+    end)
+  end
+
+  defp unfold(agg, _, _, 0) do
+    bind(agg, fn {_, list} -> constant(Enum.reverse(list)) end)
+  end
+
+  defp unfold(agg, freq, cmd_list, size) do
+    bind(agg, fn {state, acc} ->
+      call =
+        cmd_list
+        |> Enum.map(fn {:cmd, _mod, func, arg_fun} ->
+          {freq.(state, func), arg_fun.(state)}
+        end)
+        |> frequency()
+        |> Enum.at(0)
+
+      if call_precondition(state, call) do
+        result = make_ref()
+        next_state = call_next_state(call, state, result)
+
+        unfold(
+          tuple({constant(next_state), constant([{state, call} | acc])}),
+          freq,
+          cmd_list,
+          size - 1
+        )
+      else
+        tuple({constant(state), constant(acc)})
       end
     end)
   end
@@ -106,26 +156,10 @@ defmodule StreamState do
     fn state -> {:call, mod, fun, arg_fun.(state)} end
   end
 
-  @spec generate_commands(module) :: StreamData.LazyTree.t()
+  @spec generate_commands(module) :: StreamData.t({symbolic_state(), command()})
   def generate_commands(mod) do
     cmd_list = command_list(mod)
-
-    new(fn seed, size ->
-      gen_cmd_list(mod.initial_state(), mod, cmd_list, size, 1, seed)
-      |> LazyTree.zip()
-      # min size is 1
-      |> LazyTree.map(&command_lazy_tree(&1, 1))
-      |> LazyTree.flatten()
-      # this is like list_uniq: filter out invalid values
-      |> LazyTree.filter(&check_preconditions(&1))
-    end)
-  end
-
-  defp gen_cmd_list(_state, _mod, _cmd_list, 0, _position, _seed), do: []
-
-  defp gen_cmd_list(state, mod, cmd_list, size, position, seed) do
-    {seed1, seed2} = split_seed(seed)
-    start_state = StreamData.constant(state)
+    initial_state = constant(mod.initial_state())
 
     freq =
       if function_exported?(mod, :weight, 2) do
@@ -134,23 +168,13 @@ defmodule StreamState do
         fn _state, _cmd -> 1 end
       end
 
-    calls =
-      cmd_list
-      |> Enum.map(fn {:cmd, _mod, func, arg_fun} ->
-        {freq.(state, func), arg_fun.(state)}
+    sized(fn size ->
+      tuple({initial_state, constant([])})
+      |> unfold(freq, cmd_list, size)
+      |> filter(fn list ->
+        Enum.all?(list, fn {state, call} -> call_precondition(state, call) end)
       end)
-      |> frequency()
-
-    tree = StreamData.__call__({start_state, calls}, seed1, size)
-    {gen_state, generated_call} = tree.root
-
-    if call_precondition(gen_state, generated_call) do
-      gen_result = {:var, position}
-      next_state = call_next_state(generated_call, gen_state, gen_result)
-      [tree | gen_cmd_list(next_state, mod, cmd_list, size - 1, position + 1, seed2)]
-    else
-      gen_cmd_list(state, mod, cmd_list, size, position, seed2)
-    end
+    end)
   end
 
   defp call_next_state({:call, mod, f, args}, state, result) do
@@ -161,10 +185,6 @@ defmodule StreamState do
     else
       state
     end
-  end
-
-  defp check_preconditions(list) do
-    Enum.all?(list, fn {state, call} -> call_precondition(state, call) end)
   end
 
   defp call_precondition(state, {:call, mod, f, args}) do
@@ -185,52 +205,5 @@ defmodule StreamState do
     else
       true
     end
-  end
-
-  @spec command_lazy_tree([{state_t, LazyTree.t()}], non_neg_integer) :: LazyTree.t()
-  defp command_lazy_tree(list, min_length) do
-    length = length(list)
-
-    if length == min_length do
-      lazy_tree_constant(list)
-    else
-      # in contrast to lists we shrink from the end
-      # towards the front and have a minimum list of 1
-      # element: The initial command.
-      children =
-        Stream.map((length - 1)..1, fn index ->
-          command_lazy_tree(List.delete_at(list, index), min_length)
-        end)
-
-      lazy_tree(list, children)
-    end
-  end
-
-  ##########
-  ## Borrowed from StreamData
-  @type state_t :: any
-
-  defp new(generator) when is_function(generator, 2) do
-    %StreamData{generator: generator}
-  end
-
-  defp lazy_tree(root, children) do
-    %LazyTree{root: root, children: children}
-  end
-
-  defp lazy_tree_constant(term) do
-    %LazyTree{root: term}
-  end
-
-  if String.to_integer(System.otp_release()) >= 20 do
-    @rand_algorithm :exsp
-  else
-    @rand_algorithm :exs64
-  end
-
-  defp split_seed(seed) do
-    {int, seed} = :rand.uniform_s(1_000_000_000, seed)
-    new_seed = :rand.seed_s(@rand_algorithm, {int, 0, 0})
-    {new_seed, seed}
   end
 end
