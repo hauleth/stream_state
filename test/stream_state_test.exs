@@ -38,4 +38,37 @@ defmodule StreamStateTest do
       end
     end
   end
+
+  describe "generate_commands/1" do
+    defmodule SampleTest do
+      def initial_state, do: nil
+
+      def foo, do: nil
+      def foo_args(_), do: []
+    end
+
+    test "returns StreamData" do
+      assert %StreamData{} = Subject.generate_commands(SampleTest)
+    end
+
+    property "always generate at least one element" do
+      check all commands <- Subject.generate_commands(SampleTest) do
+        assert length(commands) > 0
+      end
+    end
+
+    property "generate entries are tuples of state and call" do
+      check all commands <- Subject.generate_commands(SampleTest) do
+        for command <- commands do
+          assert {_, {:call, SampleTest, :foo, _}} = command
+        end
+      end
+    end
+  end
+
+  describe "assert_state/1" do
+    test "succeeds when result is :ok" do
+      assert Subject.assert_state(%StreamState{result: :ok})
+    end
+  end
 end

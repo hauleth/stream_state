@@ -7,7 +7,7 @@ defmodule StreamState do
   import ExUnit.Assertions
 
   @type symbolic_state :: term()
-  @opaque command :: {:call, module(), atom(), list()}
+  @type command :: {:call, module(), atom(), list()}
 
   defstruct history: [],
             state: nil,
@@ -145,7 +145,7 @@ defmodule StreamState do
           size - 1
         )
       else
-        tuple({constant(state), constant(acc)})
+        unfold(tuple({constant(state), constant(acc)}), freq, cmd_list, size)
       end
     end)
   end
