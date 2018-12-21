@@ -4,15 +4,35 @@ defmodule StreamState do
   """
 
   import StreamData
-  import ExUnit.Assertions
 
   @type symbolic_state :: term()
+  @type dynamic_state :: term()
   @type command :: {:call, module(), atom(), list()}
+
+  @typep failure :: {:pre, command()} | {:post, command(), result :: term()}
+
+  @type result :: %__MODULE__{
+          history: [{dynamic_state(), command(), result :: term()}],
+          state: dynamic_state(),
+          result: :ok | {:failed, failure}
+        }
 
   defstruct history: [],
             state: nil,
             result: :ok
 
+  defmacro __using__(_) do
+    quote do
+      use ExUnitProperties
+
+      import unquote(__MODULE__)
+      import unquote(__MODULE__).Assertions
+    end
+  end
+
+  import StreamState.Callbacks
+
+  @spec run_commands(commands) :: result() when commands: [{symbolic_state, command()}]
   def run_commands(commands) do
     commands
     |> Enum.reduce_while(%__MODULE__{}, fn cmd, acc ->
@@ -31,67 +51,12 @@ defmodule StreamState do
     end)
   end
 
-  def assert_state(%__MODULE__{result: :ok}), do: :ok
-
-  def assert_state(%__MODULE__{result: {:failed, failure}, state: state, history: history}) do
-    assert false, format_msg(failure, state, history)
-  end
-
-  defp format_msg({:post, cmd, result}, state, history) do
-    """
-    Postcondition failed.
-
-    Current state: #{inspect(state)}
-
-    History:
-
-    #{print_history(history)}
-
-    Failed:
-
-      Command: #{print_command(cmd)}
-      Result:  #{inspect(result)}
-    """
-  end
-
-  defp format_msg({:pre, cmd}, state, history) do
-    """
-    Precondition failed.
-
-    Current state: #{inspect(state)}
-
-    History:
-
-    #{print_history(history)}
-
-    Failed:
-
-      Command: #{print_command(cmd)}
-    """
-  end
-
-  defp print_command({:call, mod, func, args}) do
-    pretty_args =
-      args
-      |> Enum.map(&inspect/1)
-      |> Enum.join(", ")
-
-    "#{inspect(mod)}.#{func}(#{pretty_args})"
-  end
-
-  defp print_history(history) do
-    history
-    |> Enum.reverse()
-    |> Enum.map(fn {_, cmd, ret} -> print_command(cmd) <> " => #{inspect(ret)}" end)
-    |> Enum.join("\n")
-  end
-
   defp execute_cmd({state, {:call, mod, func, args} = cmd}) do
-    unless call_precondition(state, cmd), do: throw(:pre)
+    unless call(:pre, cmd, state), do: throw(:pre)
 
     result = apply(mod, func, args)
 
-    unless call_postcondition(state, cmd, result), do: throw({:post, result})
+    unless call(:post, cmd, state, [result]), do: throw({:post, result})
 
     {:ok, {state, cmd, result}}
   catch
@@ -104,18 +69,15 @@ defmodule StreamState do
   end
 
   defp command_list(mod) do
-    mod.module_info(:exports)
-    |> Stream.filter(fn {func, _arity} ->
-      function_exported?(mod, :"#{func}_args", 1) or
-        function_exported?(mod, :"#{func}_command", 1)
-    end)
+    mod
+    |> get_states()
     |> Enum.map(fn {func, _arity} ->
       if function_exported?(mod, :"#{func}_args", 1) do
         args_fun = fn state -> constant(apply(mod, :"#{func}_args", [state])) end
         args = gen_call(mod, func, args_fun)
-        {:cmd, mod, :"#{func}", args}
+        {:cmd, mod, func, args}
       else
-        {:cmd, mod, :"#{func}", &apply(mod, :"#{func}_command", &1)}
+        {:cmd, mod, func, &apply(mod, :"#{func}_command", &1)}
       end
     end)
   end
@@ -134,9 +96,9 @@ defmodule StreamState do
         |> frequency()
         |> Enum.at(0)
 
-      if call_precondition(state, call) do
+      if call(:pre, call, state) do
         result = make_ref()
-        next_state = call_next_state(call, state, result)
+        next_state = call(:next, call, state, [result], state)
 
         unfold(
           tuple({constant(next_state), constant([{state, call} | acc])}),
@@ -156,7 +118,7 @@ defmodule StreamState do
     fn state -> {:call, mod, fun, arg_fun.(state)} end
   end
 
-  @spec generate_commands(module) :: StreamData.t({symbolic_state(), command()})
+  @spec generate_commands(module) :: StreamData.t([{symbolic_state(), command()}])
   def generate_commands(mod) do
     cmd_list = command_list(mod)
     initial_state = constant(mod.initial_state())
@@ -172,38 +134,8 @@ defmodule StreamState do
       tuple({initial_state, constant([])})
       |> unfold(freq, cmd_list, size)
       |> filter(fn list ->
-        Enum.all?(list, fn {state, call} -> call_precondition(state, call) end)
+        Enum.all?(list, fn {state, call} -> call(:pre, call, state) end)
       end)
     end)
-  end
-
-  defp call_next_state({:call, mod, f, args}, state, result) do
-    name = :"#{f}_next"
-
-    if function_exported?(mod, name, 3) do
-      apply(mod, :"#{f}_next", [state, args, result])
-    else
-      state
-    end
-  end
-
-  defp call_precondition(state, {:call, mod, f, args}) do
-    name = :"#{f}_pre"
-
-    if function_exported?(mod, name, 2) do
-      apply(mod, name, [state, args])
-    else
-      true
-    end
-  end
-
-  defp call_postcondition(state, {:call, mod, f, args}, result) do
-    name = :"#{f}_post"
-
-    if function_exported?(mod, name, 3) do
-      apply(mod, name, [state, args, result])
-    else
-      true
-    end
   end
 end

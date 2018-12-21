@@ -4,7 +4,7 @@ defmodule StreamStateTest do
   i.e. `CounterTest.Cache.Eqc`
   """
 
-  use ExUnit.Case
+  use ExUnit.Case, async: true
   use ExUnitProperties
 
   alias StreamState, as: Subject
@@ -40,7 +40,7 @@ defmodule StreamStateTest do
   end
 
   describe "generate_commands/1" do
-    defmodule SampleTest do
+    defmodule SimpleTest do
       def initial_state, do: nil
 
       def foo, do: nil
@@ -48,27 +48,21 @@ defmodule StreamStateTest do
     end
 
     test "returns StreamData" do
-      assert %StreamData{} = Subject.generate_commands(SampleTest)
+      assert %StreamData{} = Subject.generate_commands(SimpleTest)
     end
 
     property "always generate at least one element" do
-      check all commands <- Subject.generate_commands(SampleTest) do
+      check all commands <- Subject.generate_commands(SimpleTest) do
         assert length(commands) > 0
       end
     end
 
     property "generate entries are tuples of state and call" do
-      check all commands <- Subject.generate_commands(SampleTest) do
+      check all commands <- Subject.generate_commands(SimpleTest) do
         for command <- commands do
-          assert {_, {:call, SampleTest, :foo, _}} = command
+          assert {_, {:call, SimpleTest, :foo, _}} = command
         end
       end
-    end
-  end
-
-  describe "assert_state/1" do
-    test "succeeds when result is :ok" do
-      assert Subject.assert_state(%StreamState{result: :ok})
     end
   end
 end
