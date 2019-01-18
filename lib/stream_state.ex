@@ -23,8 +23,6 @@ defmodule StreamState do
 
   defmacro __using__(_) do
     quote do
-      use ExUnitProperties
-
       import unquote(__MODULE__)
       import unquote(__MODULE__).Assertions
     end

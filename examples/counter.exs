@@ -2,6 +2,7 @@ ExUnit.start()
 
 defmodule StreamStateTest do
   use ExUnit.Case
+  use ExUnitProperties
   use StreamState
 
   require Logger
